@@ -36,11 +36,21 @@ if "character_replacements" not in st.session_state:
     st.session_state["character_replacements"] = copy.deepcopy(DEFAULT_REPLACEMENTS)
 
 
-def clean_ref(value: str) -> str:
+def clean_ref(value: str, replacements=None) -> str:
     value = (value or "").strip()
-    value = value.replace("/", "_")
-    value = re.sub(r'[<>:"\\|?*\x00-\x1f]', "_", value)
-    value = re.sub(r"\s+", "_", value)
+    rules = DEFAULT_REPLACEMENTS if replacements is None else replacements
+
+    # Apply configured replacements first (longest search strings first).
+    # The space token is a literal single space in the replacement editor.
+    for source, target in sorted(rules.items(), key=lambda item: len(item[0]), reverse=True):
+        if source:
+            value = value.replace(source, str(target or ""))
+
+    # Replace any remaining filename-invalid characters safely.
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
+    # If no explicit space rule was configured, normalise remaining whitespace.
+    if " " not in rules:
+        value = re.sub(r"\s+", "_", value)
     value = re.sub(r"_+", "_", value)
     return value.strip(" ._")
 
