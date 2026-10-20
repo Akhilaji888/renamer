@@ -18,6 +18,8 @@ if os.name == "nt":
 
 st.set_page_config(page_title="NEXUS | TIFF OCR Renamer", page_icon="📄", layout="wide")
 
+DEFAULT_REPLACEMENTS = {"/": "_", "\\": "_", " ": "_"}
+
 DEFAULT_CONFIG = {
     "Policy": ["Open Policy No", "Policy No", "Policy Number"],
     "Claim": ["Claim No", "Claim Number", "Claim #"],
@@ -30,6 +32,8 @@ st.caption("Upload TIFF files or a ZIP of TIFF files, review detected references
 
 if "templates" not in st.session_state:
     st.session_state["templates"] = copy.deepcopy(DEFAULT_CONFIG)
+if "character_replacements" not in st.session_state:
+    st.session_state["character_replacements"] = copy.deepcopy(DEFAULT_REPLACEMENTS)
 
 
 def clean_ref(value: str) -> str:
@@ -41,7 +45,7 @@ def clean_ref(value: str) -> str:
     return value.strip(" ._")
 
 
-def extract_reference(text: str, doc_type: str, templates=None) -> str:
+def extract_reference(text: str, doc_type: str, templates=None, replacements=None) -> str:
     labels = (templates or DEFAULT_CONFIG).get(doc_type, [])
     # First try to capture text appearing after a configured label.
     for label in labels:
@@ -50,13 +54,13 @@ def extract_reference(text: str, doc_type: str, templates=None) -> str:
         if match:
             candidate = match.group(1).strip().splitlines()[0]
             candidate = re.split(r"\s{2,}|\s+(?:Insured|Customer|Name|Date|Period|Address)\b", candidate, maxsplit=1, flags=re.I)[0]
-            candidate = clean_ref(candidate)
+            candidate = clean_ref(candidate, replacements)
             if candidate:
                 return candidate
     # Fallback: look for likely reference-shaped codes.
     candidates = re.findall(r"\b[A-Z0-9]+(?:[/_-][A-Z0-9]+){1,7}\b", (text or "").upper())
     if candidates:
-        return clean_ref(candidates[0])
+        return clean_ref(candidates[0], replacements)
     return ""
 
 
@@ -115,7 +119,7 @@ def collect_uploads(uploaded_files, max_files: int, max_file_mb: int):
     return items, errors
 
 
-def make_rows(items, doc_type: str, templates=None):
+def make_rows(items, doc_type: str, templates=None, replacements=None):
     rows = []
     previews = {}
     progress = st.progress(0, text="Starting OCR…")
@@ -124,7 +128,7 @@ def make_rows(items, doc_type: str, templates=None):
         row = {"Original path": name, "Detected reference": "", "Status": "Pending", "OCR text": ""}
         try:
             text, preview = ocr_tiff(data)
-            reference = extract_reference(text, doc_type, templates)
+            reference = extract_reference(text, doc_type, templates, replacements)
             row["Detected reference"] = reference
             row["Status"] = "Matched" if reference else "Missing"
             row["OCR text"] = text[:4000]
@@ -138,7 +142,7 @@ def make_rows(items, doc_type: str, templates=None):
     return pd.DataFrame(rows), previews
 
 
-def calculate_destinations(df: pd.DataFrame, doc_type: str):
+def calculate_destinations(df: pd.DataFrame, doc_type: str, replacements=None):
     used = {}
     destinations = []
     for _, row in df.iterrows():
@@ -146,7 +150,7 @@ def calculate_destinations(df: pd.DataFrame, doc_type: str):
         parent = str(PurePosixPath(original).parent)
         basename = PurePosixPath(original).name
         extension = PurePosixPath(basename).suffix or ".tif"
-        reference = clean_ref(str(row.get("Detected reference", "")))
+        reference = clean_ref(str(row.get("Detected reference", "")), replacements)
         status = str(row.get("Status", ""))
         if not reference or status.startswith("Error"):
             folder = "Missing"
@@ -220,6 +224,54 @@ with tab_templates:
             st.session_state[f"template_text_{template_type}"] = "\n".join(DEFAULT_CONFIG[template_type])
             st.success(f"Restored default labels for {template_type}.")
             st.rerun()
+    st.divider()
+    st.subheader("Character replacement rules")
+    st.write("Choose how characters in detected references should be replaced before the filename is created. These rules also apply to references you edit manually.")
+    replacement_rows = []
+    for source, target in st.session_state["character_replacements"].items():
+        replacement_rows.append({"Find character/text": "␠ (space)" if source == " " else source, "Replace with": target})
+    replacement_df = pd.DataFrame(replacement_rows, columns=["Find character/text", "Replace with"])
+    edited_replacements = st.data_editor(
+        replacement_df,
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Find character/text": st.column_config.TextColumn("Find character/text", help="Enter a character or text to replace. Use ␠ (space) to target a single space."),
+            "Replace with": st.column_config.TextColumn("Replace with", help="Leave blank to remove the matching character/text."),
+        },
+        key="char_replacements_editor",
+    )
+    repl_save_col, repl_reset_col = st.columns(2)
+    with repl_save_col:
+        if st.button("Save character replacements", type="primary", key="save_character_replacements"):
+            new_replacements = {}
+            valid = True
+            for _, row in edited_replacements.iterrows():
+                source = str(row.get("Find character/text", "") or "").strip()
+                target = str(row.get("Replace with", "") or "")
+                if source == "␠ (space)":
+                    source = " "
+                if not source:
+                    continue
+                if source in new_replacements:
+                    st.error(f"Duplicate replacement rule for {source!r}.")
+                    valid = False
+                    break
+                new_replacements[source] = target
+            if valid:
+                st.session_state["character_replacements"] = new_replacements
+                st.success("Character replacement rules saved for this browser session.")
+                st.rerun()
+    with repl_reset_col:
+        if st.button("Reset character replacements", key="reset_character_replacements"):
+            st.session_state["character_replacements"] = copy.deepcopy(DEFAULT_REPLACEMENTS)
+            st.session_state["char_replacements_editor"] = pd.DataFrame([
+                {"Find character/text": "␠ (space)" if k == " " else k, "Replace with": v}
+                for k, v in DEFAULT_REPLACEMENTS.items()
+            ])
+            st.rerun()
+    st.caption("Default rules replace /, backslash and spaces with underscores. Other filename-invalid characters are replaced with underscores automatically. Rules are currently session-only.")
     st.caption("Note: template edits are kept in this browser session. They are not shared with other users or permanently stored after the session ends.")
     st.markdown("**Current templates**")
     st.dataframe(
@@ -240,7 +292,7 @@ with tab_process:
                 st.error("No usable TIFF files were found in the uploads.")
                 st.stop()
             with st.spinner("Running OCR. Large batches may take a few minutes…"):
-                df, previews = make_rows(items, doc_type, st.session_state["templates"])
+                df, previews = make_rows(items, doc_type, st.session_state["templates"], st.session_state["character_replacements"])
             st.session_state["ocr_df"] = df
             st.session_state["previews"] = previews
             st.session_state["doc_type"] = doc_type
@@ -264,7 +316,7 @@ with tab_process:
             },
             key="review_editor",
         )
-        destinations = calculate_destinations(edited, st.session_state.get("doc_type", doc_type))
+        destinations = calculate_destinations(edited, st.session_state.get("doc_type", doc_type), st.session_state["character_replacements"])
         preview_df = pd.DataFrame({"Original path": edited["Original path"], "Proposed destination": destinations, "Status": edited["Status"]})
         with st.expander("Preview proposed filenames", expanded=True):
             st.dataframe(preview_df, use_container_width=True, hide_index=True)
